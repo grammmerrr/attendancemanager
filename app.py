@@ -86,7 +86,7 @@ def process_command(command, user_id, user_name, response_url):
                 log_messages = [f"{cmd} at {time}" for cmd, time in logs]
                 message = "📜 Your logs:
 " + "
-".join(log_messages)
+".join(log_messages)"
             else:
                 message = "No logs found for your account."
 
