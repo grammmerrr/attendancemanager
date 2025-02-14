@@ -1,43 +1,81 @@
-import os
-import json
 from flask import Flask, request, jsonify
-from slack_sdk import WebClient
-from slack_sdk.errors import SlackApiError
-from flask_sqlalchemy import SQLAlchemy
+import sqlite3
+import threading
+import os
+from datetime import datetime
 
 app = Flask(__name__)
 
-# ✅ Configure database
-app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///attendance.db'
-db = SQLAlchemy(app)
+# ✅ Database setup
+DB_FILE = "attendance.db"
 
-# ✅ Slack Bot Token
-SLACK_BOT_TOKEN = os.getenv("SLACK_BOT_TOKEN")
-client = WebClient(token=SLACK_BOT_TOKEN)
+def init_db():
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id TEXT,
+            user_name TEXT,
+            command TEXT,
+            timestamp TEXT
+        )
+    ''')
+    conn.commit()
+    conn.close()
 
-# ✅ Attendance Model
-class Attendance(db.Model):
-    id = db.Column(db.Integer, primary_key=True)
-    user_id = db.Column(db.String(50), nullable=False)
-    user_name = db.Column(db.String(50), nullable=False)
-    action = db.Column(db.String(20), nullable=False)
-    timestamp = db.Column(db.DateTime, default=db.func.current_timestamp())
+init_db()
 
-# ✅ Initialize DB
-with app.app_context():
-    db.create_all()
-
-@app.route('/slack/events', methods=['POST'])
-def slack_events():
-    """Handles Slack Event Subscriptions and Challenge Verification."""
-    data = request.json
-    if "challenge" in data:
-        return jsonify({"challenge": data["challenge"]})
-    return jsonify({"status": "OK"}), 200
-
-@app.route('/')
+@app.route("/")
 def home():
-    return "✅ Flask Slack Bot Running!", 200
+    return "Slack Attendance Bot is Running! 🚀"
+
+@app.route("/slack/command", methods=["POST"])
+def slack_command():
+    data = request.form
+    command = data.get("command")
+    user_id = data.get("user_id")
+    user_name = data.get("user_name")
+
+    # ✅ Instant Slack response to prevent timeout
+    response = {"text": f"Processing {command} for {user_name}..."}
+    threading.Thread(target=process_command, args=(command, user_id, user_name)).start()
+    
+    return jsonify(response), 200
+
+def process_command(command, user_id, user_name):
+    # ✅ Background task to save command logs
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute("INSERT INTO logs (user_id, user_name, command, timestamp) VALUES (?, ?, ?, ?)",
+                   (user_id, user_name, command, timestamp))
+    conn.commit()
+    conn.close()
+    print(f"✅ Saved: {user_name} - {command} at {timestamp}")
+
+@app.route("/logs", methods=["GET"])
+def view_logs():
+    # ✅ User can view their own logs
+    user_id = request.args.get("user_id")
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM logs WHERE user_id = ? ORDER BY timestamp DESC", (user_id,))
+    logs = cursor.fetchall()
+    conn.close()
+    
+    return jsonify({"logs": logs})
+
+@app.route("/alllogs", methods=["GET"])
+def view_all_logs():
+    # ✅ Admin can view all logs
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM logs ORDER BY timestamp DESC")
+    logs = cursor.fetchall()
+    conn.close()
+    
+    return jsonify({"all_logs": logs})
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
