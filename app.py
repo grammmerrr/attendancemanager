@@ -1,21 +1,22 @@
 from flask import Flask, request, jsonify
-import sqlite3
+import os
 import threading
 import requests
+import psycopg2
 from datetime import datetime
 
 app = Flask(__name__)
 
-# Database setup
-DB_FILE = "attendance.db"
+# Get PostgreSQL connection URL from environment variables
+DATABASE_URL = os.getenv("DATABASE_URL")
 
 def init_db():
-    """Initialize the database if it does not exist."""
-    conn = sqlite3.connect(DB_FILE)
+    """Initialize the PostgreSQL database."""
+    conn = psycopg2.connect(DATABASE_URL, sslmode="require")
     cursor = conn.cursor()
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS logs (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id SERIAL PRIMARY KEY,
             user_id TEXT,
             user_name TEXT,
             command TEXT,
@@ -33,102 +34,130 @@ def home():
 
 @app.route("/slack/command", methods=["POST"])
 def slack_command():
-    """Handles Slack commands and immediately responds to prevent timeouts."""
+    """Handles Slack commands and responds immediately."""
     try:
         data = request.form
         command = data.get("command")
         user_id = data.get("user_id")
         user_name = data.get("user_name")
-        response_url = data.get("response_url")  # Get the response URL for delayed responses
+        response_url = data.get("response_url")
 
-        if not command or not user_id or not user_name or not response_url:
+        if not all([command, user_id, user_name, response_url]):
             return jsonify({"text": "❌ Missing data in request"}), 400
 
-        print(f"🔄 Received: {command} from {user_name} (ID: {user_id})")  # Debug log
+        print(f"🔄 Received: {command} from {user_name}")
 
-        # Respond immediately to Slack
-        response = {"text": f"✅ {command} received for {user_name}, processing..."}
+        # Start background thread
         threading.Thread(
             target=process_command,
             args=(command, user_id, user_name, response_url),
             daemon=True
         ).start()
 
-        return jsonify(response), 200
+        return jsonify({"text": f"✅ {command} received, processing..."}), 200
     except Exception as e:
         print(f"❌ Error in /slack/command: {e}")
         return jsonify({"error": "Internal server error"}), 500
 
 def process_command(command, user_id, user_name, response_url):
-    """Background task to process commands and log them."""
+    """Process commands in the background."""
     try:
-        print(f"🔄 Processing: {command} for {user_name}")  # Debug log
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-        # Log the command to the database
-        conn = sqlite3.connect(DB_FILE)
+        # Connect to PostgreSQL
+        conn = psycopg2.connect(DATABASE_URL, sslmode="require")
         cursor = conn.cursor()
+
+        # Log the command
         cursor.execute(
-            "INSERT INTO logs (user_id, user_name, command, timestamp) VALUES (?, ?, ?, ?)",
+            "INSERT INTO logs (user_id, user_name, command, timestamp) VALUES (%s, %s, %s, %s)",
             (user_id, user_name, command, timestamp)
         )
         conn.commit()
-        conn.close()
 
-        print(f"✅ Saved: {user_name} - {command} at {timestamp}")  # Debug log
+        # Handle commands
+        if command == "/checkin":
+            message = f"✅ {user_name}, you have successfully checked in at {timestamp}."
 
-        # Handle specific commands
-        if command == "/mylogs":
-            # Fetch logs for the user
-            conn = sqlite3.connect(DB_FILE)
-            cursor = conn.cursor()
+        elif command == "/checkout":
+            # Check if the user has checked in today
             cursor.execute(
-                "SELECT command, timestamp FROM logs WHERE user_id = ? ORDER BY timestamp DESC",
+                "SELECT command FROM logs WHERE user_id = %s AND command = '/checkin' AND timestamp::date = %s::date",
+                (user_id, timestamp)
+            )
+            if cursor.fetchone():
+                message = f"✅ {user_name}, you have successfully checked out at {timestamp}."
+            else:
+                message = f"❌ {user_name}, you must check in before checking out."
+
+        elif command == "/breakstart":
+            # Check if the user has checked in today
+            cursor.execute(
+                "SELECT command FROM logs WHERE user_id = %s AND command = '/checkin' AND timestamp::date = %s::date",
+                (user_id, timestamp)
+            )
+            if cursor.fetchone():
+                message = f"✅ {user_name}, your break has started at {timestamp}."
+            else:
+                message = f"❌ {user_name}, you must check in before starting a break."
+
+        elif command == "/breakend":
+            # Check if the user has started a break today
+            cursor.execute(
+                "SELECT command FROM logs WHERE user_id = %s AND command = '/breakstart' AND timestamp::date = %s::date",
+                (user_id, timestamp)
+            )
+            if cursor.fetchone():
+                message = f"✅ {user_name}, your break has ended at {timestamp}."
+            else:
+                message = f"❌ {user_name}, you must start a break before ending it."
+
+        elif command == "/mylog":
+            # Fetch today's logs for the user
+            cursor.execute(
+                "SELECT command, timestamp FROM logs WHERE user_id = %s AND timestamp::date = %s::date ORDER BY timestamp",
+                (user_id, timestamp)
+            )
+            logs = cursor.fetchall()
+            if logs:
+                message = "📜 Today's log:\n" + "\n".join([f"{cmd} at {time}" for cmd, time in logs])
+            else:
+                message = "No logs found for today."
+
+        elif command == "/mylogs":
+            # Fetch all logs for the user
+            cursor.execute(
+                "SELECT command, timestamp FROM logs WHERE user_id = %s ORDER BY timestamp DESC",
                 (user_id,)
             )
             logs = cursor.fetchall()
-            conn.close()
-
-            # Format the logs into a message
             if logs:
-                log_messages = [f"{cmd} at {time}" for cmd, time in logs]
-                message = "📜 Your logs:\n" + "\n".join(log_messages)
+                message = "📜 Your logs:\n" + "\n".join([f"{cmd} at {time}" for cmd, time in logs])
             else:
                 message = "No logs found for your account."
 
-            # Send the formatted logs to Slack using the response_url
-            requests.post(response_url, json={"text": message})
-
         elif command == "/alllogs":
-            # Fetch all logs from the database
-            conn = sqlite3.connect(DB_FILE)
-            cursor = conn.cursor()
+            # Fetch all logs (admin only)
             cursor.execute("SELECT user_name, command, timestamp FROM logs ORDER BY timestamp DESC")
             logs = cursor.fetchall()
-            conn.close()
-
-            # Format the logs into a message
             if logs:
-                log_messages = [f"{user} - {cmd} at {time}" for user, cmd, time in logs]
-                message = "📜 All logs:\n" + "\n".join(log_messages)
+                message = "📜 All logs:\n" + "\n".join([f"{user} - {cmd} at {time}" for user, cmd, time in logs])
             else:
-                message = "No logs found in the database."
+                message = "Database empty."
 
-            # Send the formatted logs to Slack using the response_url
-            requests.post(response_url, json={"text": message})
+        else:
+            message = "❌ Unrecognized command."
 
-        elif command == "/checkin":
-            # Handle check-in logic (e.g., mark attendance)
-            message = f"✅ {user_name}, you have successfully checked in at {timestamp}."
-            requests.post(response_url, json={"text": message})
+        # Send response to Slack
+        requests.post(response_url, json={"text": message})
+
+        cursor.close()
+        conn.close()
 
     except Exception as e:
-        print(f"❌ Error processing {command}: {e}")  # Catch errors
-        error_message = f"❌ Error processing command: {str(e)}"
-        requests.post(response_url, json={"text": error_message})
+        print(f"❌ Error processing {command}: {e}")
+        requests.post(response_url, json={"text": f"❌ Error: {str(e)}"})
 
 if __name__ == "__main__":
-    print("🚀 Starting Flask Server...")
     app.run(host="0.0.0.0", port=5000)
-
     
