@@ -11,23 +11,19 @@ DB_FILE = "attendance.db"
 
 def init_db():
     
-    try:
-        conn = sqlite3.connect(DB_FILE)
-        cursor = conn.cursor()
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS logs (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id TEXT,
-                user_name TEXT,
-                command TEXT,
-                timestamp TEXT
-            )
-        ''')
-        conn.commit()
-        conn.close()
-        print("✅ Database initialized")
-    except Exception as e:
-        print(f"❌ Error initializing database: {e}")
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id TEXT,
+            user_name TEXT,
+            command TEXT,
+            timestamp TEXT
+        )
+    ''')
+    conn.commit()
+    conn.close()
 
 init_db()
 
@@ -38,29 +34,34 @@ def home():
 @app.route("/slack/command", methods=["POST"])
 def slack_command():
     
-    data = request.form
-    command = data.get("command")
-    user_id = data.get("user_id")
-    user_name = data.get("user_name")
+    try:
+        data = request.form
+        command = data.get("command")
+        user_id = data.get("user_id")
+        user_name = data.get("user_name")
 
-    if not command or not user_id or not user_name:
-        return jsonify({"text": "❌ Missing data in request"}), 400
+        if not command or not user_id or not user_name:
+            return jsonify({"text": "❌ Missing data in request"}), 400
 
-    print(f"🔄 Received: {command} from {user_name} (ID: {user_id})")  # ✅ Debug log
+        print(f"🔄 Received: {command} from {user_name} (ID: {user_id})")  # ✅ Debug log
 
-    # ✅ Respond immediately to Slack
-    response = {"text": f"✅ {command} received for {user_name}, processing..."}
-    threading.Thread(target=process_command, args=(command, user_id, user_name)).start()
+        # ✅ Respond immediately to Slack
+        response = {"text": f"✅ {command} received for {user_name}, processing..."}
+        threading.Thread(target=process_command, args=(command, user_id, user_name), daemon=True).start()
 
-    return jsonify(response), 200
+        return jsonify(response), 200
+    except Exception as e:
+        print(f"❌ Error in /slack/command: {e}")
+        return jsonify({"error": "Internal server error"}), 500
 
 def process_command(command, user_id, user_name):
-    
+   
     try:
         print(f"🔄 Processing: {command} for {user_name}")  # ✅ Debug log
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-        conn = sqlite3.connect(DB_FILE)
+        # ✅ Ensure SQLite is accessed properly in a separate connection
+        conn = sqlite3.connect(DB_FILE, check_same_thread=False)
         cursor = conn.cursor()
         cursor.execute("INSERT INTO logs (user_id, user_name, command, timestamp) VALUES (?, ?, ?, ?)",
                        (user_id, user_name, command, timestamp))
@@ -73,13 +74,13 @@ def process_command(command, user_id, user_name):
 
 @app.route("/logs", methods=["GET"])
 def view_logs():
-   
+  
     user_id = request.args.get("user_id")
     if not user_id:
         return jsonify({"error": "Missing user_id parameter"}), 400
 
     try:
-        conn = sqlite3.connect(DB_FILE)
+        conn = sqlite3.connect(DB_FILE, check_same_thread=False)
         cursor = conn.cursor()
         cursor.execute("SELECT * FROM logs WHERE user_id = ? ORDER BY timestamp DESC", (user_id,))
         logs = cursor.fetchall()
@@ -94,7 +95,7 @@ def view_logs():
 def view_all_logs():
     
     try:
-        conn = sqlite3.connect(DB_FILE)
+        conn = sqlite3.connect(DB_FILE, check_same_thread=False)
         cursor = conn.cursor()
         cursor.execute("SELECT * FROM logs ORDER BY timestamp DESC")
         logs = cursor.fetchall()
@@ -108,5 +109,6 @@ def view_all_logs():
 if __name__ == "__main__":
     print("🚀 Starting Flask Server...")
     app.run(host="0.0.0.0", port=5000)
+
 
     
