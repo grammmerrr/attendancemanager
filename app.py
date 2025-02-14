@@ -6,11 +6,10 @@ from datetime import datetime
 
 app = Flask(__name__)
 
-# ✅ Database File
+# ✅ Database setup
 DB_FILE = "attendance.db"
 
 def init_db():
-    
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
     cursor.execute('''
@@ -33,20 +32,19 @@ def home():
 
 @app.route("/slack/command", methods=["POST"])
 def slack_command():
-    
     data = request.form
     command = data.get("command")
     user_id = data.get("user_id")
     user_name = data.get("user_name")
 
-    # ✅ Immediately respond to Slack to prevent timeout
+    # ✅ Instant Slack response to prevent timeout
     response = {"text": f"Processing {command} for {user_name}..."}
     threading.Thread(target=process_command, args=(command, user_id, user_name)).start()
-
+    
     return jsonify(response), 200
 
 def process_command(command, user_id, user_name):
-    
+    # ✅ Background task to save command logs
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
@@ -56,41 +54,29 @@ def process_command(command, user_id, user_name):
     conn.close()
     print(f"✅ Saved: {user_name} - {command} at {timestamp}")
 
-@app.route("/mylogs", methods=["POST"])
-def my_logs():
-   
-    user_id = request.form.get("user_id")
-
+@app.route("/logs", methods=["GET"])
+def view_logs():
+    # ✅ User can view their own logs
+    user_id = request.args.get("user_id")
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
-    cursor.execute("SELECT command, timestamp FROM logs WHERE user_id = ? ORDER BY timestamp DESC LIMIT 10", (user_id,))
+    cursor.execute("SELECT * FROM logs WHERE user_id = ? ORDER BY timestamp DESC", (user_id,))
     logs = cursor.fetchall()
     conn.close()
-
-    if not logs:
-        return jsonify({"text": "No logs found!"})
-
-    logs_text = "
-".join([f"{log[1]} - {log[0]}" for log in logs])
-    return jsonify({"text": f"Your last 10 logs:
-{logs_text}"}), 200
-
-@app.route("/alllogs", methods=["POST"])
-def all_logs():
     
+    return jsonify({"logs": logs})
+
+@app.route("/alllogs", methods=["GET"])
+def view_all_logs():
+    # ✅ Admin can view all logs
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
-    cursor.execute("SELECT user_name, command, timestamp FROM logs ORDER BY timestamp DESC LIMIT 20")
+    cursor.execute("SELECT * FROM logs ORDER BY timestamp DESC")
     logs = cursor.fetchall()
     conn.close()
-
-    if not logs:
-        return jsonify({"text": "No logs found!"})
-
-    logs_text = "
-".join([f"{log[2]} - {log[0]}: {log[1]}" for log in logs])
-    return jsonify({"text": f"All logs:
-{logs_text}"}), 200
+    
+    return jsonify({"all_logs": logs})
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
+    
