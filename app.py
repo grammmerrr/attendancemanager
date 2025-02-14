@@ -1,27 +1,31 @@
 from flask import Flask, request, jsonify
-import os
+import psycopg2
 import threading
 import requests
-import psycopg2
+import os
 from datetime import datetime
 
 app = Flask(__name__)
 
-# Get PostgreSQL connection URL from environment variables
-DATABASE_URL = os.getenv("DATABASE_URL")
+# ✅ PostgreSQL Database Configuration
+DATABASE_URL = os.getenv("DATABASE_URL")  # Ensure this is set in Render's environment variables
+
+def connect_db():
+    """Connect to PostgreSQL database."""
+    return psycopg2.connect(DATABASE_URL, sslmode="require")
 
 def init_db():
-    """Initialize the PostgreSQL database."""
-    conn = psycopg2.connect(DATABASE_URL, sslmode="require")
+    """Initialize the database with required tables."""
+    conn = connect_db()
     cursor = conn.cursor()
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS logs (
             id SERIAL PRIMARY KEY,
-            user_id TEXT,
-            user_name TEXT,
-            command TEXT,
-            timestamp TEXT
-        )
+            user_id TEXT NOT NULL,
+            user_name TEXT NOT NULL,
+            command TEXT NOT NULL,
+            timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
     ''')
     conn.commit()
     conn.close()
@@ -30,134 +34,131 @@ init_db()
 
 @app.route("/")
 def home():
-    return "Slack Attendance Bot is Running! 🚀"
+    return "✅ Slack Attendance Manager is Running!"
 
 @app.route("/slack/command", methods=["POST"])
 def slack_command():
-    """Handles Slack commands and responds immediately."""
+    """Handles Slack commands and prevents timeout using an instant response."""
     try:
         data = request.form
         command = data.get("command")
         user_id = data.get("user_id")
         user_name = data.get("user_name")
-        response_url = data.get("response_url")
+        response_url = data.get("response_url")  # Slack response URL for async updates
 
         if not all([command, user_id, user_name, response_url]):
-            return jsonify({"text": "❌ Missing data in request"}), 400
+            return jsonify({"text": "❌ Missing required data."}), 400
 
-        print(f"🔄 Received: {command} from {user_name}")
+        print(f"🔄 Received: {command} from {user_name} (ID: {user_id})")
 
-        # Start background thread
-        threading.Thread(
-            target=process_command,
-            args=(command, user_id, user_name, response_url),
-            daemon=True
-        ).start()
+        # ✅ Respond instantly to Slack
+        response = {"text": f"✅ {command} received for {user_name}, processing..."}
+        threading.Thread(target=process_command, args=(command, user_id, user_name, response_url), daemon=True).start()
 
-        return jsonify({"text": f"✅ {command} received, processing..."}), 200
+        return jsonify(response), 200
     except Exception as e:
         print(f"❌ Error in /slack/command: {e}")
-        return jsonify({"error": "Internal server error"}), 500
+        return jsonify({"text": "❌ Internal server error"}), 500
 
 def process_command(command, user_id, user_name, response_url):
-    """Process commands in the background."""
+    """Processes Slack commands in the background and logs them to PostgreSQL."""
     try:
+        print(f"🔄 Processing: {command} for {user_name}")
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-        # Connect to PostgreSQL
-        conn = psycopg2.connect(DATABASE_URL, sslmode="require")
+        conn = connect_db()
         cursor = conn.cursor()
-
-        # Log the command
         cursor.execute(
             "INSERT INTO logs (user_id, user_name, command, timestamp) VALUES (%s, %s, %s, %s)",
             (user_id, user_name, command, timestamp)
         )
         conn.commit()
+        conn.close()
 
-        # Handle commands
-        if command == "/checkin":
-            message = f"✅ {user_name}, you have successfully checked in at {timestamp}."
+        print(f"✅ Saved: {user_name} - {command} at {timestamp}")
 
-        elif command == "/checkout":
-            # Check if the user has checked in today
-            cursor.execute(
-                "SELECT command FROM logs WHERE user_id = %s AND command = '/checkin' AND timestamp::date = %s::date",
-                (user_id, timestamp)
-            )
-            if cursor.fetchone():
-                message = f"✅ {user_name}, you have successfully checked out at {timestamp}."
-            else:
-                message = f"❌ {user_name}, you must check in before checking out."
-
-        elif command == "/breakstart":
-            # Check if the user has checked in today
-            cursor.execute(
-                "SELECT command FROM logs WHERE user_id = %s AND command = '/checkin' AND timestamp::date = %s::date",
-                (user_id, timestamp)
-            )
-            if cursor.fetchone():
-                message = f"✅ {user_name}, your break has started at {timestamp}."
-            else:
-                message = f"❌ {user_name}, you must check in before starting a break."
-
-        elif command == "/breakend":
-            # Check if the user has started a break today
-            cursor.execute(
-                "SELECT command FROM logs WHERE user_id = %s AND command = '/breakstart' AND timestamp::date = %s::date",
-                (user_id, timestamp)
-            )
-            if cursor.fetchone():
-                message = f"✅ {user_name}, your break has ended at {timestamp}."
-            else:
-                message = f"❌ {user_name}, you must start a break before ending it."
-
-        elif command == "/mylog":
-            # Fetch today's logs for the user
-            cursor.execute(
-                "SELECT command, timestamp FROM logs WHERE user_id = %s AND timestamp::date = %s::date ORDER BY timestamp",
-                (user_id, timestamp)
-            )
-            logs = cursor.fetchall()
-            if logs:
-                message = "📜 Today's log:\n" + "\n".join([f"{cmd} at {time}" for cmd, time in logs])
-            else:
-                message = "No logs found for today."
+        if command == "/mylog":
+            fetch_user_log(user_id, response_url)
 
         elif command == "/mylogs":
-            # Fetch all logs for the user
-            cursor.execute(
-                "SELECT command, timestamp FROM logs WHERE user_id = %s ORDER BY timestamp DESC",
-                (user_id,)
-            )
-            logs = cursor.fetchall()
-            if logs:
-                message = "📜 Your logs:\n" + "\n".join([f"{cmd} at {time}" for cmd, time in logs])
-            else:
-                message = "No logs found for your account."
+            fetch_user_logs(user_id, response_url)
 
         elif command == "/alllogs":
-            # Fetch all logs (admin only)
-            cursor.execute("SELECT user_name, command, timestamp FROM logs ORDER BY timestamp DESC")
-            logs = cursor.fetchall()
-            if logs:
-                message = "📜 All logs:\n" + "\n".join([f"{user} - {cmd} at {time}" for user, cmd, time in logs])
-            else:
-                message = "Database empty."
+            fetch_all_logs(response_url)
 
-        else:
-            message = "❌ Unrecognized command."
-
-        # Send response to Slack
-        requests.post(response_url, json={"text": message})
-
-        cursor.close()
-        conn.close()
+        elif command in ["/checkin", "/checkout", "/breakstart", "/breakend"]:
+            message = f"✅ {user_name}, {command.replace('/', '').capitalize()} recorded at {timestamp}."
+            requests.post(response_url, json={"text": message})
 
     except Exception as e:
         print(f"❌ Error processing {command}: {e}")
-        requests.post(response_url, json={"text": f"❌ Error: {str(e)}"})
+        requests.post(response_url, json={"text": f"❌ Error processing command: {str(e)}"})
+
+def fetch_user_log(user_id, response_url):
+    """Fetch today's attendance log for the user."""
+    try:
+        conn = connect_db()
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT command, timestamp FROM logs WHERE user_id = %s AND DATE(timestamp) = CURRENT_DATE ORDER BY timestamp DESC",
+            (user_id,)
+        )
+        logs = cursor.fetchall()
+        conn.close()
+
+        if logs:
+            log_messages = [f"{cmd} at {time}" for cmd, time in logs]
+            message = "📜 Your log for today:\n" + "\n".join(log_messages)
+        else:
+            message = "📜 No logs found for today."
+
+        requests.post(response_url, json={"text": message})
+    except Exception as e:
+        requests.post(response_url, json={"text": f"❌ Error fetching logs: {str(e)}"})
+
+def fetch_user_logs(user_id, response_url):
+    """Fetch full attendance history for the user."""
+    try:
+        conn = connect_db()
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT command, timestamp FROM logs WHERE user_id = %s ORDER BY timestamp DESC",
+            (user_id,)
+        )
+        logs = cursor.fetchall()
+        conn.close()
+
+        if logs:
+            log_messages = [f"{cmd} at {time}" for cmd, time in logs]
+            message = "📜 Your attendance history:\n" + "\n".join(log_messages)
+        else:
+            message = "📜 No logs found."
+
+        requests.post(response_url, json={"text": message})
+    except Exception as e:
+        requests.post(response_url, json={"text": f"❌ Error fetching logs: {str(e)}"})
+
+def fetch_all_logs(response_url):
+    """Fetch all logs (Admin only)."""
+    try:
+        conn = connect_db()
+        cursor = conn.cursor()
+        cursor.execute("SELECT user_name, command, timestamp FROM logs ORDER BY timestamp DESC")
+        logs = cursor.fetchall()
+        conn.close()
+
+        if logs:
+            log_messages = [f"{user} - {cmd} at {time}" for user, cmd, time in logs]
+            message = "📜 All logs:\n" + "\n".join(log_messages)
+        else:
+            message = "📜 No logs found in the database."
+
+        requests.post(response_url, json={"text": message})
+    except Exception as e:
+        requests.post(response_url, json={"text": f"❌ Error fetching all logs: {str(e)}"})
 
 if __name__ == "__main__":
+    print("🚀 Starting Flask Server...")
     app.run(host="0.0.0.0", port=5000)
+
     
