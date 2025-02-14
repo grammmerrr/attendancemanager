@@ -1,14 +1,16 @@
 from flask import Flask, request, jsonify
 import sqlite3
 import threading
-import requests  # Add this import for sending data to response_url
+import requests  # For sending delayed responses to Slack
 from datetime import datetime
 
 app = Flask(__name__)
 
+# Database setup
 DB_FILE = "attendance.db"
 
 def init_db():
+    """Initialize the database if it does not exist."""
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
     cursor.execute('''
@@ -31,34 +33,38 @@ def home():
 
 @app.route("/slack/command", methods=["POST"])
 def slack_command():
+    """Handles Slack commands and immediately responds to prevent timeouts."""
     try:
         data = request.form
         command = data.get("command")
         user_id = data.get("user_id")
         user_name = data.get("user_name")
-        response_url = data.get("response_url")  # Get the response URL
+        response_url = data.get("response_url")  # Get the response URL for delayed responses
 
         if not command or not user_id or not user_name or not response_url:
             return jsonify({"text": "❌ Missing data in request"}), 400
 
-        print(f"🔄 Received: {command} from {user_name}")
+        print(f"🔄 Received: {command} from {user_name} (ID: {user_id})")  # Debug log
 
-        # Pass response_url to the background thread
+        # Respond immediately to Slack
+        response = {"text": f"✅ {command} received for {user_name}, processing..."}
         threading.Thread(
             target=process_command,
             args=(command, user_id, user_name, response_url),
             daemon=True
         ).start()
 
-        return jsonify({"text": f"✅ {command} received, processing..."}), 200
+        return jsonify(response), 200
     except Exception as e:
         print(f"❌ Error in /slack/command: {e}")
         return jsonify({"error": "Internal server error"}), 500
 
 def process_command(command, user_id, user_name, response_url):
+    """Background task to process commands and log them."""
     try:
+        print(f"🔄 Processing: {command} for {user_name}")  # Debug log
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        
+
         # Log the command to the database
         conn = sqlite3.connect(DB_FILE)
         cursor = conn.cursor()
@@ -68,6 +74,8 @@ def process_command(command, user_id, user_name, response_url):
         )
         conn.commit()
         conn.close()
+
+        print(f"✅ Saved: {user_name} - {command} at {timestamp}")  # Debug log
 
         # Handle specific commands
         if command == "/mylogs":
@@ -84,29 +92,24 @@ def process_command(command, user_id, user_name, response_url):
             # Format the logs into a message
             if logs:
                 log_messages = [f"{cmd} at {time}" for cmd, time in logs]
-                message = "📜 Your logs"
-" + "
-".join(log_messages)"
+                message = "📜 Your logs:\n" + "\n".join(log_messages)
             else:
                 message = "No logs found for your account."
 
             # Send the formatted logs to Slack using the response_url
             requests.post(response_url, json={"text": message})
 
-        # Add handling for other commands if needed
-        # elif command == "/othercommand":
-        #     ...
-
     except Exception as e:
+        print(f"❌ Error processing {command}: {e}")  # Catch errors
         error_message = f"❌ Error processing command: {str(e)}"
-        print(error_message)
         requests.post(response_url, json={"text": error_message})
 
 @app.route("/logs", methods=["GET"])
 def view_logs():
+    """User can view their own logs."""
     user_id = request.args.get("user_id")
     if not user_id:
-        return jsonify({"error": "Missing user_id"}), 400
+        return jsonify({"error": "Missing user_id parameter"}), 400
 
     try:
         conn = sqlite3.connect(DB_FILE)
@@ -114,25 +117,29 @@ def view_logs():
         cursor.execute("SELECT * FROM logs WHERE user_id = ? ORDER BY timestamp DESC", (user_id,))
         logs = cursor.fetchall()
         conn.close()
+
         return jsonify({"logs": logs})
     except Exception as e:
         print(f"❌ Error fetching logs: {e}")
-        return jsonify({"error": "Database error"}), 500
+        return jsonify({"error": "Failed to fetch logs"}), 500
 
 @app.route("/alllogs", methods=["GET"])
 def view_all_logs():
+    """Admin can view all logs."""
     try:
         conn = sqlite3.connect(DB_FILE)
         cursor = conn.cursor()
         cursor.execute("SELECT * FROM logs ORDER BY timestamp DESC")
         logs = cursor.fetchall()
         conn.close()
+
         return jsonify({"all_logs": logs})
     except Exception as e:
         print(f"❌ Error fetching all logs: {e}")
-        return jsonify({"error": "Database error"}), 500
+        return jsonify({"error": "Failed to fetch logs"}), 500
 
 if __name__ == "__main__":
+    print("🚀 Starting Flask Server...")
     app.run(host="0.0.0.0", port=5000)
 
     
