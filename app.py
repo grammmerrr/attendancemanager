@@ -84,7 +84,7 @@ def process_command(command, user_id, user_name, response_url):
             # Format the logs into a message
             if logs:
                 log_messages = [f"{cmd} at {time}" for cmd, time in logs]
-                message = "📜 Your logs:
+                message = "📜 Your logs"
 " + "
 ".join(log_messages)"
             else:
