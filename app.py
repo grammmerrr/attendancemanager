@@ -1,7 +1,7 @@
 from flask import Flask, request, jsonify
 import sqlite3
 import threading
-import requests  # For sending delayed responses to Slack
+import requests
 from datetime import datetime
 
 app = Flask(__name__)
@@ -99,44 +99,33 @@ def process_command(command, user_id, user_name, response_url):
             # Send the formatted logs to Slack using the response_url
             requests.post(response_url, json={"text": message})
 
+        elif command == "/alllogs":
+            # Fetch all logs from the database
+            conn = sqlite3.connect(DB_FILE)
+            cursor = conn.cursor()
+            cursor.execute("SELECT user_name, command, timestamp FROM logs ORDER BY timestamp DESC")
+            logs = cursor.fetchall()
+            conn.close()
+
+            # Format the logs into a message
+            if logs:
+                log_messages = [f"{user} - {cmd} at {time}" for user, cmd, time in logs]
+                message = "📜 All logs:\n" + "\n".join(log_messages)
+            else:
+                message = "No logs found in the database."
+
+            # Send the formatted logs to Slack using the response_url
+            requests.post(response_url, json={"text": message})
+
+        elif command == "/checkin":
+            # Handle check-in logic (e.g., mark attendance)
+            message = f"✅ {user_name}, you have successfully checked in at {timestamp}."
+            requests.post(response_url, json={"text": message})
+
     except Exception as e:
         print(f"❌ Error processing {command}: {e}")  # Catch errors
         error_message = f"❌ Error processing command: {str(e)}"
         requests.post(response_url, json={"text": error_message})
-
-@app.route("/logs", methods=["GET"])
-def view_logs():
-    """User can view their own logs."""
-    user_id = request.args.get("user_id")
-    if not user_id:
-        return jsonify({"error": "Missing user_id parameter"}), 400
-
-    try:
-        conn = sqlite3.connect(DB_FILE)
-        cursor = conn.cursor()
-        cursor.execute("SELECT * FROM logs WHERE user_id = ? ORDER BY timestamp DESC", (user_id,))
-        logs = cursor.fetchall()
-        conn.close()
-
-        return jsonify({"logs": logs})
-    except Exception as e:
-        print(f"❌ Error fetching logs: {e}")
-        return jsonify({"error": "Failed to fetch logs"}), 500
-
-@app.route("/alllogs", methods=["GET"])
-def view_all_logs():
-    """Admin can view all logs."""
-    try:
-        conn = sqlite3.connect(DB_FILE)
-        cursor = conn.cursor()
-        cursor.execute("SELECT * FROM logs ORDER BY timestamp DESC")
-        logs = cursor.fetchall()
-        conn.close()
-
-        return jsonify({"all_logs": logs})
-    except Exception as e:
-        print(f"❌ Error fetching all logs: {e}")
-        return jsonify({"error": "Failed to fetch logs"}), 500
 
 if __name__ == "__main__":
     print("🚀 Starting Flask Server...")
