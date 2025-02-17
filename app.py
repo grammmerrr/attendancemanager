@@ -4,6 +4,12 @@ import threading
 import requests
 import os
 from datetime import datetime
+from dotenv import load_dotenv
+import os
+
+load_dotenv()  # Load environment variables from .env
+
+DATABASE_URL = os.getenv("DATABASE_URL")
 
 app = Flask(__name__)
 
@@ -160,5 +166,4 @@ def fetch_all_logs(response_url):
 if __name__ == "__main__":
     print("🚀 Starting Flask Server...")
     app.run(host="0.0.0.0", port=5000)
-
-    
+ 
